@@ -30,7 +30,15 @@ def main():
 		print("Old posts removed from shortlist")
 		#update lastseen on posts which have been locked but are no longer
 		unlockedupkeep()
-		print("!! - MAIN LOOP END. 5 Seconds to CTRL+C")
+		print("Running canary routine")
+		canary(r)
+		print("!! - MAIN LOOP COMPLETE, 5 second coffee break")
+		print("   ( (     ")
+		print("    ) )    ")
+		print(" ........  ")
+		print(" |      |] ")
+		print(" \      /  ")
+		print("  `----'   ")
 		time.sleep(5)
 
 def bot_login(): #interface with reddit's bot API
@@ -70,7 +78,10 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 			title VARCHAR(300),
 			user VARCHAR(20),
 			subreddit VARCHAR(50),
-			firstseen datetime);"""
+			firstseen datetime);
+
+		CREATE TABLE IF NOT EXISTS canary (
+			word VARCHAR(30));"""
 	try:
 		cursor.execute(query)
 		db.commit()
@@ -246,8 +257,13 @@ def checkblocked(id, subreddit):
 	try:
 		cursor.execute("SELECT id from blocked WHERE id = %s", ([id]))
 		blockcheck = cursor.fetchone()
+		cursor.execute("SELECT cuid from locked_post WHERE id = %s", ([id]))
+		existcheck = cursor.fetchone()
 		if blockcheck is not None:
 			print("   Post is in blocked list")
+			return False
+		elif existcheck is not None:
+			print("   Surrogate post exists in DB, presume removed by moderator")
 			return False
 		elif subreddit == "legaladvice":
 			print("   Post is from r/legaladvice")
@@ -274,6 +290,66 @@ def unlockedupkeep():
 	except MySQLdb.Error as e:
 		db.rollback()
 	cursor.close()
+
+def canary(r):
+	#This function will check the frontpage for posts containing ultra-high-risk phrases and place a link comment in them
+	#canary words are manually identified and stored in the db table canary
+	cursor = db.cursor()
+	try:
+		#obtain list of ids which we want to post comments on
+		cursor.execute("""SELECT fp.id, fph.title, c.word
+				from frontpage fp
+				join frontpage_history fph on fph.id = fp.id
+				join canary c on fph.title like c.word
+				left join locked_post lp on lp.id = fph.id
+				where lp.id is null;""")
+		if cursor.rowcount > 0:
+			idlist = cursor.fetchall()
+			for id in idlist:
+				print("CANARY ALERT!")
+				print("     URL: redd.it/" + id[0])
+				print("   Title: " + id[1][:70])
+				trigword = id[2][1:-1]
+				print("    Word: " + trigword)
+				#comment on post
+				#canarycomment(r, id[0], trigword)
+		else:
+			print("No canary alerts")
+	except MySQLdb.Error as e:
+		db.rollback()
+	cursor.close()
+
+def canarycomment(r, postid, word):
+	#This function will (if it has not already) make a comment on a canary-targeted thread
+	#check if comment already exists
+	#get comments on post
+	post = r.submission(id = postid)
+	for comment in post.comments:
+		#check if commentunlockbot has made a comment
+		if str(comment.author) == 'nobody_likes_soda':
+			print("Comment posted!")
+
+def canarytext(postid, word):
+	cursor = db.cursor()
+	searchword = '%' + word + '%'
+	try:
+		cursor.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+		sql = """SELECT SUM(CASE WHEN lp.id is not null then 1 else 0 end) as lockcount, count(*) as total
+			FROM frontpage_history fph
+			LEFT JOIN locked_post lp on lp.id = fph.id
+			WHERE fph.title like %s
+			AND fph.id != %s"""
+		cursor.execute(sql, ([searchword], [postid]))
+		stats = cursor.fetchone()
+	except MySQLdb.Error as e:
+		db.rollback()
+		print("Database Error (canarytext)")
+		stats = None
+	if stats is not None:
+		text = "Did you know? Of the " + str(stats[1]) + "front page posts containing the string \'" + word + ",\' " + str(stats[0]) + " of them have been locked since late March?  "
+		text += "\nYou can continue discussing locked threads on r/commentunlock."
+	else:
+		text = None
 
 if __name__ == '__main__':
 	main()
