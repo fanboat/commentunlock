@@ -1,3 +1,4 @@
+
 #commentunlockbot
 #A reddit bot by fanboat
 #reddit.com/r/commentunlock
@@ -23,13 +24,10 @@ def main():
 		print(" ")
 		print("!! - MAIN LOOP BEGIN at time: " + str(now))
 		lock_scan(r)
+		print("Lock scan complete, Scanning front page")
 		time.sleep(1)
 		fp_scan(r)
 		print("Front page scanned, database updated")
-		fp_trim()
-		print("Old posts removed from shortlist")
-		#update lastseen on posts which have been locked but are no longer
-		unlockedupkeep()
 		print("Running canary routine")
 		canary(r)
 		print("!! - MAIN LOOP COMPLETE, 5 second coffee break")
@@ -60,14 +58,7 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 			cuid VARCHAR(10),
 			firstlocked DATETIME,
 			lastlocked DATETIME,
-			created DATETIME,
-			lastseen DATETIME);
-
-		CREATE TABLE IF NOT EXISTS frontpage (
-			id VARCHAR(10) PRIMARY KEY,
-			firstseen DATETIME,
-			locked TINYINT,
-			current TINYINT DEFAULT 0);
+			lockkarma int);
 
 		CREATE TABLE IF NOT EXISTS blocked (
 			id VARCHAR(10) PRIMARY KEY,
@@ -78,10 +69,20 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 			title VARCHAR(300),
 			user VARCHAR(20),
 			subreddit VARCHAR(50),
-			firstseen datetime);
+			firstseen datetime,
+			created datetime,
+			lastseen datetime,
+			firstkarma int,
+			lastkarma int,
+			peakkarma int);
 
 		CREATE TABLE IF NOT EXISTS canary (
-			word VARCHAR(30));"""
+			word VARCHAR(30));
+
+		CREATE TABLE IF NOT EXISTS important_dates (
+			name VARCHAR(30),
+			date DATETIME,
+			comment VARCHAR(300));"""
 	try:
 		cursor.execute(query)
 		db.commit()
@@ -89,7 +90,7 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 		db.rollback()
 	cursor.close()
 
-def insertnew(shortlink, cushortlink, created):
+def insertnew(shortlink, cushortlink, karma):
 	id = shortlink[16:]
 	if cushortlink is not None:
 		cuid = cushortlink[16:]
@@ -98,28 +99,10 @@ def insertnew(shortlink, cushortlink, created):
 	cursor = db.cursor()
 	now = datetime.datetime.now()
 	try:
-		cursor.execute("""INSERT INTO locked_post SELECT %s, %s, %s, %s, %s, %s
-					ON DUPLICATE KEY UPDATE lastseen = %s, lastlocked = %s""", (id, cuid, str(now), str(now), created, str(now), str(now), str(now)))
-		cursor.execute("UPDATE frontpage SET locked = 1 where id = %s", ([id]))
+		cursor.execute("""INSERT INTO locked_post SELECT %s, %s, %s, %s, %s
+					ON DUPLICATE KEY UPDATE lastlocked = %s""", (id, cuid, str(now), str(now), karma, str(now)))
 		db.commit()
 		print("   Inserted (or updated) database for locked_post " + id)
-	except MySQLdb.Error as e:
-		db.rollback()
-	cursor.close()
-
-def updatelastlocked(shortlink, created):
-	id = shortlink[16:]
-	cursor = db.cursor()
-	try:
-		cursor.execute("SELECT id, COUNT(*) FROM locked_post WHERE id = %s GROUP BY id", ([id]))
-		row_count = cursor.rowcount
-		if row_count > 0:
-			now = datetime.datetime.now()
-			cursor.execute("UPDATE locked_post SET lastlocked = %s WHERE id = %s", (str(now),id))
-			db.commit()
-			print("   Updated database for locked_post " + id)
-		else:
-			insertnew(shortlink, None, created)
 	except MySQLdb.Error as e:
 		db.rollback()
 	cursor.close()
@@ -137,12 +120,13 @@ def lock_scan(r):
 				print("Locked Post Found: ")
 				print("   Sub  : " + str(post.subreddit))
 				print("   Title: " + post.title[:70])
-				print("   ID   : " + post.shortlink[16:])
+				print("   URL  : redd.it/" + post.shortlink[16:])
 				count = 0
 				maxcount = 20 #how many recent posts to check on commentunlock sub
 				commentunlocknew = r.subreddit('commentunlock').new(limit=maxcount)
 				for crosspost in commentunlocknew:
 					if str(crosspost.title) == crosstitle:
+						cushortlink = crosspost.shortlink
 						break
 					else:
 						count += 1
@@ -166,12 +150,12 @@ def lock_scan(r):
 					except prawcore.exceptions.InvalidToken:
 						print("prawcore 2")
 					#db entry
-					insertnew(post.shortlink, cushortlink, datetime.datetime.fromtimestamp(post.created_utc))
+					insertnew(post.shortlink, cushortlink, post.score)
 					time.sleep(5)
 				else:
 					print("   Crosspost already exists at position: "+str(count))
 					#db update
-					updatelastlocked(post.shortlink, datetime.datetime.fromtimestamp(post.created_utc))
+					insertnew(post.shortlink, cushortlink, post.score)
 				time.sleep(1)
 			elif str(post.subreddit) == "commentunlock":
 				#We're on the front page??
@@ -198,11 +182,7 @@ def fp_scan(r):
 				user = None
 			subreddit = str(post.subreddit)
 			title = str(post.title).encode("ascii", "ignore")
-			if post.locked:
-				locked = 1
-			else:
-				locked = 0
-			fp_insert(id, title, user, subreddit, locked)
+			fp_insert(id, title, user, subreddit, datetime.datetime.fromtimestamp(post.created_utc), post.score)
 	#except HttpError:
 		#print("HTTP error2?")
 	except prawcore.exceptions.ResponseException:
@@ -212,43 +192,17 @@ def fp_scan(r):
 	except prawcore.exceptions.InvalidToken:
 		print("prawcore 3")
 
-def fp_insert(id, title, user, subreddit, locked):
+def fp_insert(id, title, user, subreddit, created, karma):
 	cursor = db.cursor()
 	now = datetime.datetime.now()
 	try:
-		cursor.execute("""INSERT INTO frontpage
-			SELECT %s, %s, %s, 1
-			ON DUPLICATE KEY UPDATE current = 1, locked = %s;""", (id, now, locked, locked))
-		db.commit()
-	except MySQLdb.Error as e:
-                db.rollback()
-	try:
+		#this (on duplicate key) replaces the functionality of the deprecated updatelastseen function
 		cursor.execute("""INSERT IGNORE INTO frontpage_history
-			SELECT %s, %s, %s, %s, %s
-			ON DUPLICATE KEY UPDATE id = id""", (id, title, user, subreddit, now))
+			SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+			ON DUPLICATE KEY UPDATE lastseen = %s,
+				lastkarma = %s,
+				peakkarma = case when %s > peakkarma or peakkarma is null then %s else peakkarma end""", (id, title, user, subreddit, now, created, now, karma, karma, karma, now, karma, karma, karma))
 	except MysSQLdb.Error as e:
-		db.rollback()
-	cursor.close()
-
-def fp_trim():
-	fp_trimA()
-	fp_trimB()
-
-def fp_trimA():
-	cursor = db.cursor()
-	try:
-		cursor.execute("DELETE FROM frontpage WHERE current = 0")
-		db.commit()
-	except MySQLdb.Error as e:
-		db.rollback()
-	cursor.close()
-
-def fp_trimB():
-	cursor = db.cursor()
-	try:
-		cursor.execute("UPDATE frontpage SET current = 0")
-		db.commit()
-	except MySQLdb.Error as e:
 		db.rollback()
 	cursor.close()
 
@@ -262,11 +216,11 @@ def checkblocked(id, subreddit):
 		if blockcheck is not None:
 			print("   Post is in blocked list")
 			return False
-		elif existcheck is not None:
-			print("   Surrogate post exists in DB, presume removed by moderator")
-			return False
 		elif subreddit == "legaladvice":
 			print("   Post is from r/legaladvice")
+			return False
+		elif existcheck is not None:
+			print("   Surrogate post exists in DB, presume removed my moderator")
 			return False
 		else:
 			print("   Post is allowed")
@@ -276,33 +230,18 @@ def checkblocked(id, subreddit):
 		return False
 	cursor.close()
 
-def unlockedupkeep():
-	#This function will check up on posts which were once locked on the front page, but were unlocked before they fell off
-	cursor = db.cursor()
-	now = datetime.datetime.now()
-	try:
-		cursor.execute("""UPDATE locked_post p
-				inner join frontpage f on
-					f.id = p.id
-				set p.lastseen = %s;""", [str(now)])
-		db.commit()
-		print("Lastseen updated")
-	except MySQLdb.Error as e:
-		db.rollback()
-	cursor.close()
-
 def canary(r):
 	#This function will check the frontpage for posts containing ultra-high-risk phrases and place a link comment in them
 	#canary words are manually identified and stored in the db table canary
 	cursor = db.cursor()
+	now = datetime.datetime.now()
 	try:
 		#obtain list of ids which we want to post comments on
-		cursor.execute("""SELECT fp.id, fph.title, c.word
-				from frontpage fp
-				join frontpage_history fph on fph.id = fp.id
+		cursor.execute("""SELECT fph.title, c.word
+				from frontpage_history fph
 				join canary c on fph.title like c.word
 				left join locked_post lp on lp.id = fph.id
-				where lp.id is null;""")
+				where lp.id is null and fph.lastseen >= DATE_ADD(%s, INTERVAL -1 MINUTE);""", [str(now)])
 		if cursor.rowcount > 0:
 			idlist = cursor.fetchall()
 			for id in idlist:
