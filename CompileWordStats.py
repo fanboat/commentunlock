@@ -25,11 +25,15 @@ def main():
 		now = datetime.datetime.now()
 		print(" ")
 		print("!! - MAIN LOOP BEGIN at time: " + str(now))
-		print("running for " + str(sdate))
+		print("   running for " + str(sdate))
 		wordgen(sdate)
 		sdate = sdate + datetime.timedelta(hours=1)
+	print("\nUpdating importantdates table")
 	updatestartdate(edate)
+	print("Rebuilding database")
 	rebuildwordstable()
+	now = datetime.datetime.now()
+	print("!! - Operations Complete at time: " + str(now))
 
 def installdb():
 	cursor = db.cursor()
@@ -41,6 +45,11 @@ def installdb():
 		locked smallint(6));
 
 	CREATE TABLE IF NOT EXISTS words (
+		word VARCHAR(300),
+		seen int(11),
+		locked int(11));
+
+	CREATE TABLE IF NOT EXISTS subwords (
 		subreddit VARCHAR(50),
 		word VARCHAR(300),
 		seen int(11),
@@ -106,12 +115,17 @@ def rebuildwordstable():
 	try:
 		cursor.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;")
 		cursor.execute("DELETE FROM words;")
+		cursor.execute("DELETE FROM subwords;")
 		cursor.execute("""DELETE FROM wordsraw
 				WHERE CHAR_LENGTH(word) = 0;""")
-		cursor.execute("""INSERT INTO words
+		cursor.execute("""INSERT INTO subwords
 				SELECT subreddit, word, sum(seen), sum(locked)
 				FROM wordsraw
 				GROUP BY subreddit, word;""")
+		cursor.execute("""INSERT INTO words
+				SELECT word, sum(seen), sum(locked)
+				FROM subwords
+				GROUP BY word;""")
 		db.commit()
 	except MySQLdb.Error as e:
 		db.rollback()

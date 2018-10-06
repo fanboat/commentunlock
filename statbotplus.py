@@ -33,13 +33,13 @@ def main():
 		mindatauser = 5
 		print("Thresholds:")
 		print("Greater than " + str(100*titlelike) + "% for Title words")
-		#print("Greater than " + str(100*sublike) + "% for Subreddit")
+		print("Greater than " + str(100*sublike) + "% for Subreddit")
 		print("Greater than " + str(100*bothlike) + "% for both")
-		#print("Greater than " + str(100*userlike) + "% for user")
+		print("Greater than " + str(100*userlike) + "% for user")
 		print("At least " + str(mindataword) + " data points for front page title words")
-		#print("At least " + str(mindatasub) + " data points for subreddit")
+		print("At least " + str(mindatasub) + " data points for subreddit")
 		print("At least " + str(mindataboth) + " data points for sub-specific front page title words")
-		#print("At least " + str(mindatauser) + " data points for User")
+		print("At least " + str(mindatauser) + " data points for User")
 		print(" ")
 		stat_scan(r, sublike, titlelike, bothlike, userlike, mindataword, mindatasub, mindataboth, mindatauser)
 		now = datetime.datetime.now()
@@ -161,30 +161,30 @@ def stat_scan(r, sublike, titlelike, bothlike, userlike, mindataword, mindatasub
 			#get stats
 			id = post.shortlink[16:]
 			title_likelihood = statcheck_title(post.title, mindataword)
-			#sub_likelihood = statcheck_subreddit(str(post.subreddit), mindatasub, id)
+			sub_likelihood = statcheck_subreddit(str(post.subreddit), mindatasub, id)
 			both_likelihood = statcheck_both(post.title, str(post.subreddit), mindataboth)
-			#if post.author is not None:
-			#	user_likelihood = statcheck_user(post.author.name, mindatauser, id)
-			#	user = post.author.name
-			#else:
-			#	user_likelihood = 0
-			#	user = '[deleted]'
-			if title_likelihood[0] > titlelike or both_likelihood[0] > bothlike: #or sub_likelihood > sublike: #or user_likelihood > userlike:
+			if post.author is not None:
+				user_likelihood = statcheck_user(post.author.name, mindatauser, id)
+				user = post.author.name
+			else:
+				user_likelihood = 0
+				user = '[deleted]'
+			if title_likelihood[0] > titlelike or both_likelihood[0] > bothlike or sub_likelihood > sublike or user_likelihood > userlike:
 				#print info
 				print("   Sub   : " + str(post.subreddit))
 				print("   Title : " + post.title[:69])
-				#print("   User  : " + user)
+				print("   User  : " + user)
 				print("   ID    : " + post.shortlink[16:])
 				if post.locked:
 					print("   Status: LOCKED")
 				else:
 					print("   Status: unlocked")
-				#print("Likelihood by subreddit: " + str(100*sub_likelihood)[:4] + '%')
+				print("Likelihood by subreddit: " + str(100*sub_likelihood)[:4] + '%')
 				print("Likelihood by title    : " + str(100*title_likelihood[0])[:4] + '%')
 				print("Most offensive word    : " + title_likelihood[1])
 				print("Likelihood by title+sub: " + str(100*both_likelihood[0])[:4] + '%')
 				print("Most offensive word    : " + both_likelihood[1])
-				#print("Likelihood by user     : " + str(100*user_likelihood)[:4] + '%')
+				print("Likelihood by user     : " + str(100*user_likelihood)[:4] + '%')
 				print(" ")
 	except praw.exceptions.PRAWException:
 		print("PRAW Error, location 1")
