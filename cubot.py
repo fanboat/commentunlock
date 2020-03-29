@@ -1,6 +1,7 @@
 
 #commentunlockbot
 #A reddit bot by fanboat
+#part of the commentunlock project
 #reddit.com/r/commentunlock
 #fanboat.co, fanboat@gmail.com
 #2018-03-21
@@ -12,22 +13,28 @@ import time
 import datetime
 import MySQLdb
 import sys
+from twython import Twython
+import json
 from urllib.error import HTTPError
 
 def main():
 	r = bot_login()
 	#installdb() #Uncomment to install database on first run
 	open_database()
+	open_twitter_database()
+	t = twitter_login('commentunlock')
 	#main loop
 	while True:
-		now = datetime.datetime.now()
+		now = datetime.datetime.utcnow()
 		print(" ")
+		print("cubot.py")
 		print("!! - MAIN LOOP BEGIN at time: " + str(now))
-		lock_scan(r)
+		lock_scan(r, t)
 		print("Lock scan complete, Scanning front page")
 		time.sleep(1)
 		fp_scan(r)
 		print("Front page scanned, database updated")
+		print("---")
 		print("Running canary routine")
 		canary(r)
 		print("!! - MAIN LOOP COMPLETE, 5 second coffee break")
@@ -51,6 +58,37 @@ def open_database(): #connect to db to log data on posts
 	global db
 	db = MySQLdb.connect('localhost', config.dbUsername, config.dbPassword, 'commentunlock')
 
+def open_twitter_database():
+	global tdb
+	tdb = MySQLdb.connect('localhost', config.dbUsername, config.dbPassword, 'twitter')
+
+def twitter_login(username): #interface with the twitter api via twython library
+	keys = get_access_keys_from_db(username) #set account to post from here (must be authorized and logged in db)
+	access_token_key = keys[0]
+	access_token_secret = keys[1]
+	t = Twython(
+		config.consumer_key,
+		config.consumer_secret,
+		access_token_key,
+		access_token_secret
+		)
+	return t
+
+def get_access_keys_from_db(username):
+	cursor = tdb.cursor()
+	keys = ("","")
+	query = """SELECT u.authkey, u.authsecret
+		FROM users u
+		WHERE u.username = '{}'""".format(username)
+	try:
+		cursor.execute(query)
+		keys = cursor.fetchone()
+	except MySQLdb.Error as e:
+		tdb.rollback()
+		print("Error (get_access_keys_from_db)")
+	cursor.close()
+	return keys
+
 def installdb(): #Only needs to be run on initial execution. Any alterations to the db will need to be made either here before the first run, or in the db itself.
 	cursor = db.cursor()
 	query = """CREATE TABLE IF NOT EXISTS locked_post (
@@ -58,7 +96,8 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 			cuid VARCHAR(10),
 			firstlocked DATETIME,
 			lastlocked DATETIME,
-			lockkarma int);
+			lockkarma INT
+			special_case VARCHAR(50));
 
 		CREATE TABLE IF NOT EXISTS blocked (
 			id VARCHAR(10) PRIMARY KEY,
@@ -74,7 +113,8 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 			lastseen datetime,
 			firstkarma int,
 			lastkarma int,
-			peakkarma int);
+			peakkarma int,
+			peakkarmatime datetime);
 
 		CREATE TABLE IF NOT EXISTS canary (
 			word VARCHAR(30));
@@ -82,7 +122,11 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 		CREATE TABLE IF NOT EXISTS important_dates (
 			name VARCHAR(30),
 			date DATETIME,
-			comment VARCHAR(300));"""
+			comment VARCHAR(300));
+
+		CREATE TABLE IF NOT EXISTS comments (
+			postid VARCHAR(10),
+			commid VARCHAR(10) PRIMARY KEY);"""
 	try:
 		cursor.execute(query)
 		db.commit()
@@ -90,29 +134,34 @@ def installdb(): #Only needs to be run on initial execution. Any alterations to 
 		db.rollback()
 	cursor.close()
 
-def insertnew(shortlink, cushortlink, karma):
+def insertnew(shortlink, cushortlink, karma, special_case):
 	id = shortlink[16:]
 	if cushortlink is not None:
 		cuid = cushortlink[16:]
 	else:
 		cuid = None
 	cursor = db.cursor()
-	now = datetime.datetime.now()
+	now = datetime.datetime.utcnow()
 	try:
-		cursor.execute("""INSERT INTO locked_post SELECT %s, %s, %s, %s, %s
-					ON DUPLICATE KEY UPDATE lastlocked = %s""", (id, cuid, str(now), str(now), karma, str(now)))
+		cursor.execute("""INSERT INTO locked_post SELECT %s, %s, %s, %s, %s, %s
+					ON DUPLICATE KEY UPDATE lastlocked = %s""", (id, cuid, str(now), str(now), karma, special_case, str(now)))
 		db.commit()
 		print("   Inserted (or updated) database for locked_post " + id)
 	except MySQLdb.Error as e:
 		db.rollback()
+		print("insertnew error")
 	cursor.close()
 
-def lock_scan(r):
+def lock_scan(r, t):
 	try:
 		frontpage = r.subreddit('all').hot(limit=100)
 		time.sleep(1)
 		for post in frontpage:
-			if post.locked:
+			#print(str(post.link_flair_text))
+			if post.locked or (str(post.subreddit).lower() == 'blackpeopletwitter' and str(post.link_flair_text).lower() == 'country club thread'):
+				special_case = None
+				if str(post.subreddit).lower() == 'blackpeopletwitter' and str(post.link_flair_text).lower() == 'country club thread':
+					special_case = 'Country Club Thread'
 				#check if it is on the subreddit, post if not
 				crosstitle = "[" + str(post.subreddit) + "] " + post.title
 				if len(str(crosstitle)) > 300:
@@ -138,9 +187,13 @@ def lock_scan(r):
 						if checkblocked(post.shortlink[16:], str(post.subreddit)):
 							cupost = r.subreddit('commentunlock').submit(crosstitle,url=crossURL)
 							cushortlink = cupost.shortlink
-							#Experimental tagging
-							#if str(post.author.name) == 'GallowBoob':
-								#post.set_flair('GallowBoob')
+							if str(post.author.name) == 'GallowBoob':
+								cupost.mod.flair(text = 'gallowboob', css_class = '')
+							if str(post.subreddit).lower() == 'blackpeopletwitter' and str(post.link_flair_text).lower() == 'country club thread':
+								cupost.mod.flair(text = 'Country Club Thread', css_class = '')
+							#If /u/totesmessenger has a comment in this post, upvote it
+							#will have to use replace_more() since totes is probably at the bottom?
+							tweet(t, crosstitle, cushortlink)
 						else:
 							cushortlink = None #else case unnecessary?
 					except HttpError:
@@ -150,12 +203,12 @@ def lock_scan(r):
 					except prawcore.exceptions.InvalidToken:
 						print("prawcore 2")
 					#db entry
-					insertnew(post.shortlink, cushortlink, post.score)
+					insertnew(post.shortlink, cushortlink, post.score, special_case)
 					time.sleep(5)
 				else:
 					print("   Crosspost already exists at position: "+str(count))
 					#db update
-					insertnew(post.shortlink, cushortlink, post.score)
+					insertnew(post.shortlink, cushortlink, post.score, special_case)
 				time.sleep(1)
 			elif str(post.subreddit) == "commentunlock":
 				#We're on the front page??
@@ -194,16 +247,24 @@ def fp_scan(r):
 
 def fp_insert(id, title, user, subreddit, created, karma):
 	cursor = db.cursor()
-	now = datetime.datetime.now()
+	now = datetime.datetime.utcnow()
 	try:
 		#this (on duplicate key) replaces the functionality of the deprecated updatelastseen function
 		cursor.execute("""INSERT IGNORE INTO frontpage_history
-			SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+			SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 			ON DUPLICATE KEY UPDATE lastseen = %s,
 				lastkarma = %s,
-				peakkarma = case when %s > peakkarma or peakkarma is null then %s else peakkarma end""", (id, title, user, subreddit, now, created, now, karma, karma, karma, now, karma, karma, karma))
+				peakkarmatime = CASE WHEN %s > peakkarma OR peakkarma IS NULL THEN %s ELSE peakkarmatime END,
+				peakkarma = CASE WHEN %s > peakkarma OR peakkarma IS NULL THEN %s ELSE peakkarma END
+			""",(id, title, user, subreddit, now, created, now, karma, karma, karma, now, now, karma, karma, now, karma, karma))
+		#print("(id, title, user, subreddit, now, created, now, karma, karma, karma, now, now, karma, karma, now, karma, karma))")
+		#print(id, title, user, subreddit, now, created, now, karma, karma, karma, now, now, karma, karma, now, karma, karma)
+		#time.sleep(1)
 	except MysSQLdb.Error as e:
+		print("Error fp_insert")
 		db.rollback()
+	except:
+		print("Error fp_insert")
 	cursor.close()
 
 def checkblocked(id, subreddit):
@@ -220,7 +281,7 @@ def checkblocked(id, subreddit):
 			print("   Post is from r/legaladvice")
 			return False
 		elif existcheck is not None:
-			print("   Surrogate post exists in DB, presume removed my moderator")
+			print("   Surrogate post exists in DB, presume removed by moderator")
 			return False
 		else:
 			print("   Post is allowed")
@@ -234,10 +295,10 @@ def canary(r):
 	#This function will check the frontpage for posts containing ultra-high-risk phrases and place a link comment in them
 	#canary words are manually identified and stored in the db table canary
 	cursor = db.cursor()
-	now = datetime.datetime.now()
+	now = datetime.datetime.utcnow()
 	try:
 		#obtain list of ids which we want to post comments on
-		cursor.execute("""SELECT fph.title, c.word
+		cursor.execute("""SELECT fph.id, fph.title, c.word, fph.subreddit
 				from frontpage_history fph
 				join canary c on fph.title like c.word
 				left join locked_post lp on lp.id = fph.id
@@ -246,29 +307,48 @@ def canary(r):
 			idlist = cursor.fetchall()
 			for id in idlist:
 				print("CANARY ALERT!")
-				print("     URL: redd.it/" + id[0])
-				print("   Title: " + id[1][:70])
 				trigword = id[2][1:-1]
-				print("    Word: " + trigword)
+				print("   Word : " + trigword)
+				print("   Sub  : " + id[3])
+				print("   Title: " + id[1][:70])
+				print("   URL  : redd.it/" + id[0])
 				#comment on post
-				#canarycomment(r, id[0], trigword)
+				#canarycomment(r, id[0], trigword, id[3])
 		else:
 			print("No canary alerts")
 	except MySQLdb.Error as e:
 		db.rollback()
 	cursor.close()
 
-def canarycomment(r, postid, word):
+def canarycomment(r, postid, word, sub):
 	#This function will (if it has not already) make a comment on a canary-targeted thread
 	#check if comment already exists
 	#get comments on post
 	post = r.submission(id = postid)
-	for comment in post.comments:
-		#check if commentunlockbot has made a comment
-		if str(comment.author) == 'nobody_likes_soda':
-			print("Comment posted!")
+	#check db for comment
+	cursor = db.cursor()
+	try:
+		cursor.execute("SELECT commid FROM comments WHERE postid = %s", ([postid]))
+		if cursor.rowcount > 0:
+			postcheck = cursor.fetchone()
+			print("Comment posted (id: " + str(postcheck[0]) + ")")
+		else:
+			postcheck = None
+			print("No comment exists; proceed to comment")
+	except MySQLdb.Error as e:
+		db.rollback()
+		print("Database Error (canarycomment 1)")
+		postcheck = ['ERROR']
+	#if no comment
+	if postcheck is None:
+		botcomment = canarytext(postid, word, sub)
+		if botcomment is not None:
+			print("Posting comment")
+			#post comment
+			print("Adding to database")
+			#place in db
 
-def canarytext(postid, word):
+def canarytext(postid, word, sub):
 	cursor = db.cursor()
 	searchword = '%' + word + '%'
 	try:
@@ -279,16 +359,49 @@ def canarytext(postid, word):
 			WHERE fph.title like %s
 			AND fph.id != %s"""
 		cursor.execute(sql, ([searchword], [postid]))
-		stats = cursor.fetchone()
+		wordstats = cursor.fetchone()
 	except MySQLdb.Error as e:
 		db.rollback()
-		print("Database Error (canarytext)")
-		stats = None
-	if stats is not None:
-		text = "Did you know? Of the " + str(stats[1]) + "front page posts containing the string \'" + word + ",\' " + str(stats[0]) + " of them have been locked since late March?  "
-		text += "\nYou can continue discussing locked threads on r/commentunlock."
+		print("Database Error (canarytext 1)")
+		wordstats = None
+	try:
+		cursor.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
+		sql = """SELECT SUM(CASE WHEN lp.id is not null then 1 else 0 end) as locked, count(*) as total
+			FROM frontpage_history fph
+			LEFT JOIN locked_post lp on lp.id = fph.id
+			WHERE fph.subreddit = %s
+			AND fph.id != %s"""
+		cursor.execute(sql, ([sub], [postid]))
+		substats = cursor.fetchone()
+	except MySQLdb.Error as e:
+		db.rollback()
+		print("Database Error (canarytext 2)")
+		substats = None
+	if wordstats is not None and substats is not None:
+		text = "Did you know? Of the " + str(wordstats[1]) + " front page posts containing the string \'" + word + ",\' " + str(wordstats[0]) + " of them have been locked since late March?  "
+		text += "\nr/" + sub + " has locked " + str(substats[0]) + " out of " + str(substats[1]) + " front page posts (" + str(round(100*substats[0]/substats[1],2)) + "%) in this time.  "
+		text += "\nYou can continue discussing locked threads (within the bounds of reddit sitewide rules) on r/commentunlock."
 	else:
 		text = None
+	return text
+
+def tweet(t, title, URL):
+	print("Attempting to tweet about:")
+	print(title)
+	body = title + " " + URL
+	tweet = t.update_status(status = body)
+	cursor = tdb.cursor()
+	body = body.replace("'","''")
+	posttime = datetime.datetime.strptime(tweet["created_at"],"%a %b %d %H:%M:%S +0000 %Y")
+	query = """INSERT INTO tweets (body, postdate, twid, type) VALUES
+		('{}','{}','{}',3)""".format(body,posttime,tweet["id"])
+	try:
+		cursor.execute(query)
+		tdb.commit()
+	except MySQLdb.Error as e:
+		tdb.rollback()
+		print("insert error (tweet)")
+	cursor.close()
 
 if __name__ == '__main__':
 	main()
